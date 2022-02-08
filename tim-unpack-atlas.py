@@ -3,14 +3,16 @@ import struct
 import os
 from PIL import Image
 from array import array
+from collections import namedtuple
+import rectpack
+import configparser
+import json
 
 if len(sys.argv) < 3:
     exit
 
 def swapNibble(arr):
     return bytes(map(lambda x: ((x & 0xF) << 4) | ((x >> 4) & 0xF), arr))
-
-BASE_PAGE_INDEX = 12
 
 def packClutAttr(x, y):
     return (y & 0x1FF) << 6 | ((x // 16) & 0x3F)
@@ -25,7 +27,7 @@ def unpackClutAttr(attr):
 def convert5to8(c):
     return ((c * 527) + 23) >> 6
 
-def convert8to8(c):
+def convert8to5(c):
     return ((c * 249) + 1014) >> 11
 
 MIN_ALPHA_THRESHOLD = 0x20 # Below this alpha, pixel is fully transparent
@@ -47,8 +49,21 @@ def RGBA5551to8888(color):
         a = 0 if is_black else 255
     return r | (g << 8) | (b << 16) | (a << 24)
 
+def RGBA8888to5551(color):
+    # Convert to 5551 with transparency bit awareness, using our logic
+    alpha = (color >> 24) & 0xFF
+    if alpha < MIN_ALPHA_THRESHOLD:
+        # Fully transparent
+        return 0
+    
+    r = convert8to5(color & 0xFF)
+    g = convert8to5((color >> 8) & 0xFF)
+    b = convert8to5((color >> 16) & 0xFF)
 
-def Palete5551to8888(palette):
+    has_transparency = alpha <= MAX_ALPHA_THRESHOLD
+    return r | (g << 5) | (b << 10) | (has_transparency << 15)
+
+def Palette5551to8888(palette):
     src_view = memoryview(palette).cast('H')
 
     dst = array('I')
@@ -57,8 +72,17 @@ def Palete5551to8888(palette):
 
     return dst.tobytes()
 
+def Palette8888to5551(palette):
+    src_view = memoryview(palette).cast('I')
+    dst = array('H')
+    for color in src_view:
+        dst.append(RGBA8888to5551(color))
+
+    return dst.tobytes()
+
 mode = sys.argv[1].lower()
 if mode == 'unpack':
+
     image_data = None
     clut_data = None
 
@@ -85,12 +109,19 @@ if mode == 'unpack':
             image_width = width * 4
             image_height = height
     
-    dirName = os.path.splitext(sys.argv[2])[0]
-    with open(os.path.join(dirName, 'definitions'), 'rb') as defs:
+    dir_name = os.path.splitext(sys.argv[2])[0]
+    with open(os.path.join(dir_name, 'definitions.bin'), 'rb') as defs:
         definitions = defs.read()
         
     if image_data:
+        # TODO: Configurable
+        BASE_PAGE_INDEX = 12
+
         image = Image.frombytes('P', (image_width, image_height), swapNibble(image_data), 'raw', 'P;4')
+
+        config = configparser.ConfigParser(allow_no_value=True)
+        config['Settings'] = {'Texpage' : BASE_PAGE_INDEX, 'Num_W_Texpages' : (image_width + 255) // 256, 'Num_H_Texpages' : (image_height + 255) // 256}
+        config['Files'] = {}
 
         # Unpack all textures from the atlas
         index = 1
@@ -104,24 +135,126 @@ if mode == 'unpack':
             clut_offset = ((pal_x - (BASE_PAGE_INDEX * 64)) * 2) + (pal_y * stride)
             clut = bytearray(image_data[clut_offset:clut_offset+32])
 
-            part.putpalette(Palete5551to8888(clut), 'RGBA')
-            part.save(os.path.join(dirName, f'tex_{index}.png'))
+            filename = f'tex_{index}.png'
+            part.putpalette(Palette5551to8888(clut), 'RGBA')
+            part.convert('RGBA').save(os.path.join(dir_name, filename))
+
+            config['Files'][filename] = None
 
             index += 1
+        
+        with open(os.path.join(dir_name, 'files.ini'), 'w') as f:
+            config.write(f)
 
-        for pal in range(48):
-            index = pal * 32
-            clut_data = image_data[index : index + 32]
+elif mode == 'pack':
+    config = configparser.ConfigParser(allow_no_value=True)
+    config.read(sys.argv[2])
+    dir_name = os.path.dirname(sys.argv[2])
 
-        #clut_data = bytearray([0x07, 0xA5, 0x27, 0xA5, 0x28, 0xA5, 0x28, 0xA5, 0x28, 0xA9, 0xE6, 0x9C, 0x63, 0x8C, 0xE6, 0x9C, 0xA4, 0x94, 0xA4, 0x94,
-        #0xA5, 0x98, 0xC5, 0x98, 0x00, 0x00, 0x21, 0x84, 0x00, 0x00, 0x00, 0x00])
-            if clut_data:
-                # TODO: This should probably be RGBA;15 to preserve alpha, see
-                # https://github.com/python-pillow/Pillow/issues/6027
-                image.putpalette(clut_data, 'RGB;15')
-            else:
-                # Fallback palette
-                image.putpalette(Image.ADAPTIVE)
+    texpage = int(config['Settings']['Texpage'])
+    texpage_sizes = (
+        int(config['Settings']['Num_W_Texpages']),
+        int(config['Settings']['Num_H_Texpages'])
+    )
+    files = list(config['Files'].keys())
+    
+    # Get dimensions of all images
+    dimensions = []
+    for file in files:
+        with Image.open(os.path.join(dir_name, file)) as im:
+            dimensions.append((*im.size, file))
+    
+    texture_size = tuple(i * 256 for i in texpage_sizes)
+    
+    palette_bytes = len(dimensions) * 32
+    palette_pixels = palette_bytes * 2
 
-            name = os.path.splitext(sys.argv[2])[0]
-            image.save(name + '_' + str(pal + 1) + '.png')
+    palette_lines = ((palette_pixels + texture_size[0] - 1) // texture_size[0])
+    
+    # We set separate bins per texpage, but they must leave enough space for palette lines
+    bin_size = (256, 256 - palette_lines)
+    packer = rectpack.newPacker(rotation=False)
+    packer.add_bin(*bin_size, count=texpage_sizes[0] * texpage_sizes[1])
+    
+    for rect in dimensions:
+        packer.add_rect(*rect)
+    
+    packer.pack()
+
+    # Get the height of the pile, it'll serve as the hint as to how many lines the resulting image should have
+    used_height = 0
+    for _, _, y, _, h, _ in packer.rect_list():
+        used_height = max(used_height, y + h)
+    
+    # Data roughly matching ingame atlas definitions, with palette and filename embedded for ease of use
+    AtlasEntryDef = namedtuple('AtlasEntryDef', ['x', 'y', 'w', 'h', 'texpage', 'palette', 'filename'])
+
+    atlas_entries = []  
+    image = Image.new('P', (texture_size[0], used_height))
+    preview_image = Image.new('RGBA', image.size)
+    # Composite the image
+    for b, x, y, w, h, rid in packer.rect_list():
+
+        with Image.open(os.path.join(dir_name, rid)).convert('RGBA') as org_im:
+            # Warn if the image has too many colors
+            if org_im.getcolors(maxcolors=16) is None:
+                print(f'WARNING: {rid} has more than 16 unique colors! The image will be quantized down to 16 colors when packing, but quality may suffer.')
+
+            area = (256 * b + x, y)
+            im = org_im.quantize(colors=16)
+            image.paste(im, area)
+            preview_image.paste(org_im, area)
+            atlas_entries.append(AtlasEntryDef(x, y, w, h, texpage + b, im.palette.getdata()[1], rid))
+    
+    preview_image.save(dir_name + '.png')
+    with open(dir_name + '.tim', 'wb') as f:
+        f.write(struct.pack('HH0IB0l', 0x10, 0, 0)) # Tag, version, format
+
+        x = 0
+        y = 0
+        tim_width = texture_size[0] // 4 # Width in halfwords
+        tim_height = used_height + palette_lines
+        image_size = ((2 * tim_width) * tim_height) + 12
+
+        f.write(struct.pack('IHHHH', image_size, x, y, tim_width, tim_height))
+
+        # Write image data
+        f.write(swapNibble(image.tobytes('raw', 'P;4')))
+
+        # Write palettes
+        palette_section_size = palette_lines * (2 * tim_width) # Size in bytes
+        palettes = bytearray()
+        for entry in atlas_entries:
+            pal = Palette8888to5551(entry.palette)
+            palettes.extend(pal)
+        f.write(palettes.ljust(palette_section_size, b'\0'))
+    
+    # Dump atlas definitions
+    definitions_file = {'textures' : {}}
+
+    atlas = definitions_file['textures']
+    pal_x = 0
+    pal_y = used_height
+    for entry in atlas_entries:
+        fn = entry.filename
+        atlas[entry.filename] = {
+            'x' : entry.x, 'y' : entry.y,
+            'palette' : packClutAttr(pal_x + (64 * texpage), pal_y),
+            'width' : entry.w, 'height' : entry.h,
+            'texture_page' : entry.texpage
+        }
+
+        pal_x += 16
+        if pal_x >= tim_width:
+            pal_x = 0
+            pal_y += 1
+    
+    with open(os.path.join(dir_name, 'definitions.json'), 'w') as f:
+        json.dump(definitions_file, f, sort_keys=True, indent=2)
+
+    # TODO: Unhardcode
+    with open(os.path.join(dir_name, 'en_us.bin'), 'wb') as f:
+        textures = ['tex_8.png', 'tex_9.png', 'tex_10.png', 'tex_11.png', 'tex_12.png', 'tex_13.png']
+        for tex in textures:
+            tex_def = atlas[tex]
+            f.write(struct.pack('BBHHHH0l', tex_def['x'], tex_def['y'], tex_def['palette'], tex_def['width'], tex_def['height'], tex_def['texture_page']))
