@@ -9,7 +9,7 @@ import configparser
 import json
 
 if len(sys.argv) < 3:
-    exit
+    exit()
 
 def swapNibble(arr):
     return bytes(map(lambda x: ((x & 0xF) << 4) | ((x >> 4) & 0xF), arr))
@@ -225,14 +225,14 @@ elif mode == 'pack':
         palette_section_size = palette_lines * (2 * tim_width) # Size in bytes
         palettes = bytearray()
         for entry in atlas_entries:
-            pal = Palette8888to5551(entry.palette)
-            palettes.extend(pal)
+            palettes.extend(Palette8888to5551(entry.palette))
         f.write(palettes.ljust(palette_section_size, b'\0'))
     
     # Dump atlas definitions
-    definitions_file = {'textures' : {}}
+    with open(os.path.join(dir_name, 'definitions.json'), 'r') as f:
+        definitions_file = json.load(f)
 
-    atlas = definitions_file['textures']
+    atlas = definitions_file.setdefault('textures', {})
     pal_x = 0
     pal_y = used_height
     for entry in atlas_entries:
@@ -251,10 +251,3 @@ elif mode == 'pack':
     
     with open(os.path.join(dir_name, 'definitions.json'), 'w') as f:
         json.dump(definitions_file, f, sort_keys=True, indent=2)
-
-    # TODO: Unhardcode
-    with open(os.path.join(dir_name, 'en_us.bin'), 'wb') as f:
-        textures = ['tex_8.png', 'tex_9.png', 'tex_10.png', 'tex_11.png', 'tex_12.png', 'tex_13.png']
-        for tex in textures:
-            tex_def = atlas[tex]
-            f.write(struct.pack('BBHHHH0l', tex_def['x'], tex_def['y'], tex_def['palette'], tex_def['width'], tex_def['height'], tex_def['texture_page']))
