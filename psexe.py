@@ -13,7 +13,8 @@ class PSEXE:
                     if header[:8] == b'PS-X EXE' and (struct.unpack_from('<I', header, 0x1C)[0] + 0x800) <= fileSize:
                         self.loadAddress = struct.unpack_from('<I', header, 0x18)[0] - 0x800
                         return
-        elif baseAddress is not None:
+        else:
+            assert baseAddress is not None, 'baseAddress must be specified when headless is True!'
             self.loadAddress = baseAddress
             return
 
@@ -79,7 +80,7 @@ class PSEXE:
     def writeAddress(self, vaddr, val):
         self.writeU32(vaddr, val)
 
-    def writeIndirectRef(self, vhigh, vlow, val):
+    def writeIndirectPtr(self, vhigh, vlow, val):
         def sign_extend(value, bits):
             sign_bit = 1 << (bits - 1)
             return (value & (sign_bit - 1)) - (value & sign_bit)

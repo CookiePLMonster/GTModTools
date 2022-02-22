@@ -14,22 +14,22 @@ if mode == 'unpack':
     image_height = 0
 
     with open(sys.argv[2], 'rb') as tim:
-        tag, version = struct.unpack('BB2x', tim.read(4))
+        tag, version = struct.unpack('<BB2x', tim.read(4))
         if tag == 0x10:
             if version != 0:
                 sys.exit(f'Unknown TIM file version {version}!')
             
-            flags = struct.unpack('B3x', tim.read(4))[0]
+            flags = struct.unpack('<B3x', tim.read(4))[0]
             bpp = flags & 3
             clp = (flags & 8) != 0
 
             if clp:
                 # Parse CLUT
-                length, x, y, width, height = struct.unpack('IHHHH', tim.read(12))
+                length, x, y, width, height = struct.unpack('<IHHHH', tim.read(12))
                 clut_data = tim.read(length - 12)
             
             # Parse image
-            length, x, y, image_width, image_height = struct.unpack('IHHHH', tim.read(12))
+            length, x, y, image_width, image_height = struct.unpack('<IHHHH', tim.read(12))
             image_data = tim.read(length - 12)
         
     if image_data:

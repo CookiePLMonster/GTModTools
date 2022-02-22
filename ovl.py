@@ -10,7 +10,7 @@ def unpack(file, output_dir='.'):
         # Simulated do...while
         do = True
         while do:
-            files.append(struct.unpack('II', ovl.read(8)))
+            files.append(struct.unpack('<II', ovl.read(8)))
             current_offset += 8
             do = current_offset < files[0][0]
      
@@ -32,7 +32,7 @@ def pack(files, output_file='GT2.OVL'):
         for file in files:
             with open(file, 'rb') as exe:
                 compressed_file = gzip.compress(exe.read())
-                header_bytes.extend(struct.pack('II', current_offset, len(compressed_file)))
+                header_bytes.extend(struct.pack('<II', current_offset, len(compressed_file)))
                 current_offset += len(compressed_file)
                 ovl.write(compressed_file)
         
