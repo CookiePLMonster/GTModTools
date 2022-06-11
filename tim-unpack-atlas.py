@@ -87,22 +87,22 @@ if mode == 'unpack':
     clut_data = None
 
     with open(sys.argv[2], 'rb') as tim:
-        tag, version = struct.unpack('BB2x', tim.read(4))
+        tag, version = struct.unpack('<BB2x', tim.read(4))
         if tag == 0x10:
             if version != 0:
                 sys.exit(f'Unknown TIM file version {version}!')
             
-            flags = struct.unpack('B3x', tim.read(4))[0]
+            flags = struct.unpack('<B3x', tim.read(4))[0]
             bpp = flags & 3
             clp = (flags & 8) != 0
 
             if clp:
                 # Parse CLUT
-                length, x, y, width, height = struct.unpack('IHHHH', tim.read(12))
+                length, x, y, width, height = struct.unpack('<IHHHH', tim.read(12))
                 clut_data = tim.read(length - 12)
             
             # Parse image
-            length, x, y, width, height = struct.unpack('IHHHH', tim.read(12))
+            length, x, y, width, height = struct.unpack('<IHHHH', tim.read(12))
             image_data = tim.read(length - 12)
             
             stride = width * 2
@@ -126,7 +126,7 @@ if mode == 'unpack':
         # Unpack all textures from the atlas
         index = 1
         for offset in range(0, len(definitions), 12):
-            x, y, palette, width, height, page_index = struct.unpack_from('BBHHHH2x', definitions, offset)
+            x, y, palette, width, height, page_index = struct.unpack_from('<BBHHHH2x', definitions, offset)
             x += (page_index - BASE_PAGE_INDEX) * 256
             part = image.crop((x, y, x + width, y + height))
 
@@ -208,7 +208,7 @@ elif mode == 'pack':
     
     preview_image.save(dir_name + '.png')
     with open(dir_name + '.tim', 'wb') as f:
-        f.write(struct.pack('HH0IB0l', 0x10, 0, 0)) # Tag, version, format
+        f.write(struct.pack('<BB2xB3x', 0x10, 0, 0)) # Tag, version, format
 
         x = 0
         y = 0
@@ -216,7 +216,7 @@ elif mode == 'pack':
         tim_height = used_height + palette_lines
         image_size = ((2 * tim_width) * tim_height) + 12
 
-        f.write(struct.pack('IHHHH', image_size, x, y, tim_width, tim_height))
+        f.write(struct.pack('<IHHHH', image_size, x, y, tim_width, tim_height))
 
         # Write image data
         f.write(swapNibble(image.tobytes('raw', 'P;4')))
@@ -232,7 +232,7 @@ elif mode == 'pack':
     with open(os.path.join(dir_name, 'definitions.json'), 'r') as f:
         definitions_file = json.load(f)
 
-    atlas = definitions_file.setdefault('textures', {})
+    atlas = {}
     pal_x = 0
     pal_y = used_height
     for entry in atlas_entries:
@@ -249,5 +249,6 @@ elif mode == 'pack':
             pal_x = 0
             pal_y += 1
     
+    definitions_file['textures'] = atlas
     with open(os.path.join(dir_name, 'definitions.json'), 'w') as f:
         json.dump(definitions_file, f, sort_keys=True, indent=2)
